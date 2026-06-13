@@ -1,0 +1,10 @@
+backend/venv/
+backend/chroma_db/
+backend/*.sqlite3
+frontend-simple/node_modules/
+
+__pycache__/
+*.py[cod]
+.DS_Store
+
+.env

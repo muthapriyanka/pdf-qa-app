@@ -1,50 +1,441 @@
-import ReactMarkdown from "react-markdown";
+const { useEffect, useRef, useState } = React;
 
-const { useState } = React;
+const API_BASE = window.location.port === "5173" ? "http://127.0.0.1:8000" : "";
+const GENERAL_COLLECTION_ID = "general";
 
-const API_BASE = "http://127.0.0.1:8000";
+const STORAGE_KEYS = {
+  activeSessionId: "qa_active_session_id_v2",
+  theme: "qa_theme_v2",
+};
 
-function App() {
-  const [selectedFile, setSelectedFile] = useState(null);
-  const [question, setQuestion] = useState("");
-  const [answerResult, setAnswerResult] = useState(null);
-  const [uploading, setUploading] = useState(false);
-  const [asking, setAsking] = useState(false);
-  const [error, setError] = useState("");
-  const [uploadResult, setUploadResult] = useState(() => {
-  const documentId = localStorage.getItem("document_id");
-  const filename = localStorage.getItem("filename");
+const DOCUMENT_PROMPTS = [
+  "Summarize these PDFs",
+  "Compare the uploaded files",
+  "What are the key ideas?",
+  "List examples from the documents",
+];
 
-  if (documentId && filename) {
-    return {
-      document_id: documentId,
-      filename: filename,
-    };
+const GENERAL_PROMPTS = [
+  "What is Python?",
+  "How many design patterns are there?",
+  "Explain REST APIs simply",
+  "What is RAG?",
+];
+
+function createMessageId() {
+  if (window.crypto?.randomUUID) {
+    return window.crypto.randomUUID();
   }
 
-  return null;
-});
+  return `${Date.now()}-${Math.random()}`;
+}
+
+function getCollectionTitle(collection) {
+  if (!collection) {
+    return "General";
+  }
+
+  if (collection.total_files === 1) {
+    return collection.documents?.[0]?.filename || "Uploaded PDF";
+  }
+
+  return `${collection.total_files} PDFs`;
+}
+
+function getInitialState() {
+  return {
+    collection: null,
+    collections: [],
+    sessions: [],
+    activeSessionId: localStorage.getItem(STORAGE_KEYS.activeSessionId) || "",
+    theme: localStorage.getItem(STORAGE_KEYS.theme) || "dark",
+  };
+}
+
+function truncateTitle(text) {
+  return text.length > 44 ? `${text.slice(0, 41)}...` : text;
+}
+
+function formatCount(count, singular, plural = `${singular}s`) {
+  return `${count} ${count === 1 ? singular : plural}`;
+}
+
+function getSessionContextLabel(session, collections) {
+  if (session.collectionId === GENERAL_COLLECTION_ID) {
+    return "General";
+  }
+
+  const collection = collections.find((item) => item.collection_id === session.collectionId);
+  return collection ? getCollectionTitle(collection) : "Documents";
+}
+
+function apiSessionToUiSession(session) {
+  return {
+    id: session.session_id,
+    collectionId: session.collection_id || GENERAL_COLLECTION_ID,
+    title: session.title || "Chat",
+    messages: (session.messages || []).map((message) => ({
+      id: message.id || createMessageId(),
+      role: message.role,
+      text: message.text,
+      source: message.source,
+      citations: message.citations || [],
+      createdAt: message.created_at,
+    })),
+    createdAt: session.created_at,
+    updatedAt: session.updated_at,
+  };
+}
+
+function App() {
+  const [initialState] = useState(getInitialState);
+  const [selectedFiles, setSelectedFiles] = useState([]);
+  const [question, setQuestion] = useState("");
+  const [uploading, setUploading] = useState(false);
+  const [asking, setAsking] = useState(false);
+  const [hydrating, setHydrating] = useState(true);
+  const [draggingFile, setDraggingFile] = useState(false);
+  const [error, setError] = useState("");
+  const [theme, setTheme] = useState(initialState.theme);
+  const [uploadResult, setUploadResult] = useState(initialState.collection);
+  const [collections, setCollections] = useState(initialState.collections);
+  const [sessions, setSessions] = useState(initialState.sessions);
+  const [activeSessionId, setActiveSessionId] = useState(initialState.activeSessionId);
+  const messagesEndRef = useRef(null);
+  const questionRef = useRef(null);
+  const fileInputRef = useRef(null);
+
+  const activeSession = sessions.find((session) => session.id === activeSessionId) || sessions[0] || null;
+  const collectionId = activeSession?.collectionId || uploadResult?.collection_id || GENERAL_COLLECTION_ID;
+  const activeCollection =
+    collectionId === GENERAL_COLLECTION_ID
+      ? null
+      : collections.find((collection) => collection.collection_id === collectionId) ||
+        (uploadResult?.collection_id === collectionId ? uploadResult : null);
+  const hasCollection = Boolean(activeCollection?.collection_id);
+  const messages = activeSession?.messages || [];
+  const promptSuggestions = hasCollection ? DOCUMENT_PROMPTS : GENERAL_PROMPTS;
+
+  const upsertSession = (nextSession) => {
+    setSessions((current) => [
+      nextSession,
+      ...current.filter((session) => session.id !== nextSession.id),
+    ]);
+  };
+
+  const createBackendSession = async (targetCollectionId = collectionId, title = "Chat") => {
+    const response = await fetch(`${API_BASE}/api/sessions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        collection_id: targetCollectionId === GENERAL_COLLECTION_ID ? null : targetCollectionId,
+        title,
+      }),
+    });
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(data.detail || "Could not create chat session.");
+    }
+
+    return apiSessionToUiSession(data);
+  };
+
+  const updateBackendSessionCollection = async (sessionId, targetCollectionId) => {
+    const response = await fetch(`${API_BASE}/api/sessions/${sessionId}`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        collection_id: targetCollectionId,
+      }),
+    });
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(data.detail || "Could not update chat document context.");
+    }
+
+    return apiSessionToUiSession(data);
+  };
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    localStorage.setItem(STORAGE_KEYS.theme, theme);
+  }, [theme]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadSavedState = async () => {
+      setHydrating(true);
+
+      try {
+        const response = await fetch(`${API_BASE}/api/state`);
+        const data = await response.json();
+
+        if (!response.ok) {
+          throw new Error(data.detail || "Could not load saved chats.");
+        }
+
+        let nextSessions = (data.sessions || []).map(apiSessionToUiSession);
+
+        if (nextSessions.length === 0) {
+          const firstSession = await createBackendSession(GENERAL_COLLECTION_ID);
+          nextSessions = [firstSession];
+        }
+
+        if (cancelled) {
+          return;
+        }
+
+        const nextCollections = data.collections || [];
+        const storedActiveSessionId = localStorage.getItem(STORAGE_KEYS.activeSessionId);
+        const nextActiveSession =
+          nextSessions.find((session) => session.id === storedActiveSessionId) ||
+          nextSessions[0];
+        const nextActiveCollection =
+          nextActiveSession.collectionId === GENERAL_COLLECTION_ID
+            ? null
+            : nextCollections.find(
+                (collection) => collection.collection_id === nextActiveSession.collectionId
+              ) || null;
+
+        setCollections(nextCollections);
+        setSessions(nextSessions);
+        setActiveSessionId(nextActiveSession.id);
+        setUploadResult(nextActiveCollection);
+      } catch (err) {
+        if (!cancelled) {
+          setError(err.message || "Could not load saved chats.");
+        }
+      } finally {
+        if (!cancelled) {
+          setHydrating(false);
+        }
+      }
+    };
+
+    loadSavedState();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (activeSessionId) {
+      localStorage.setItem(STORAGE_KEYS.activeSessionId, activeSessionId);
+    }
+  }, [activeSessionId]);
+
+  useEffect(() => {
+    if (!sessions.some((session) => session.id === activeSessionId)) {
+      setActiveSessionId(sessions[0]?.id || "");
+    }
+  }, [sessions, activeSessionId]);
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [messages, asking]);
+
+  const updateSession = (sessionId, updater) => {
+    setSessions((current) =>
+      current.map((session) => (
+        session.id === sessionId ? updater(session) : session
+      ))
+    );
+  };
+
+  const selectFiles = (fileList) => {
+    const files = Array.from(fileList || []);
+    setError("");
+
+    if (files.length === 0) {
+      setSelectedFiles([]);
+      return;
+    }
+
+    const invalidFile = files.find(
+      (file) => file.type !== "application/pdf" && !file.name.toLowerCase().endsWith(".pdf")
+    );
+
+    if (invalidFile) {
+      setSelectedFiles([]);
+      setError("Please choose PDF files only.");
+      return;
+    }
+
+    setSelectedFiles(files);
+  };
+
+  const usePrompt = (prompt) => {
+    setQuestion(prompt);
+    questionRef.current?.focus();
+  };
+
+  const openCollection = async (collection) => {
+    setUploadResult(collection);
+    const collectionSessions = sessions.filter(
+      (session) => session.collectionId === collection.collection_id
+    );
+
+    if (collectionSessions.length > 0) {
+      setActiveSessionId(collectionSessions[0].id);
+    } else {
+      try {
+        const nextSession = await createBackendSession(collection.collection_id);
+        upsertSession(nextSession);
+        setActiveSessionId(nextSession.id);
+      } catch (err) {
+        setError(err.message || "Could not create chat session.");
+        return;
+      }
+    }
+
+    setError("");
+  };
+
+  const openSession = (session) => {
+    setActiveSessionId(session.id);
+
+    if (session.collectionId === GENERAL_COLLECTION_ID) {
+      setUploadResult(null);
+    } else {
+      const collection = collections.find((item) => item.collection_id === session.collectionId);
+      setUploadResult(collection || null);
+    }
+
+    setError("");
+  };
+
+  const createNewChat = async () => {
+    try {
+      const nextSession = await createBackendSession(collectionId);
+      upsertSession(nextSession);
+      setActiveSessionId(nextSession.id);
+      setError("");
+    } catch (err) {
+      setError(err.message || "Could not create chat session.");
+    }
+  };
+
+  const clearChat = async () => {
+    if (!activeSession) {
+      return;
+    }
+
+    try {
+      const response = await fetch(`${API_BASE}/api/sessions/${activeSession.id}/messages`, {
+        method: "DELETE",
+      });
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.detail || "Could not clear chat.");
+      }
+
+      upsertSession(apiSessionToUiSession(data));
+      setError("");
+    } catch (err) {
+      setError(err.message || "Could not clear chat.");
+    }
+  };
+
+  const renameChat = async (session) => {
+    const nextTitle = window.prompt("Rename chat", session.title);
+
+    if (nextTitle === null) {
+      return;
+    }
+
+    const trimmedTitle = nextTitle.trim();
+
+    if (!trimmedTitle) {
+      setError("Chat title cannot be empty.");
+      return;
+    }
+
+    try {
+      const response = await fetch(`${API_BASE}/api/sessions/${session.id}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ title: trimmedTitle }),
+      });
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.detail || "Could not rename chat.");
+      }
+
+      upsertSession(apiSessionToUiSession(data));
+      setError("");
+    } catch (err) {
+      setError(err.message || "Could not rename chat.");
+    }
+  };
+
+  const deleteChat = async (session) => {
+    if (!window.confirm(`Delete "${session.title}"?`)) {
+      return;
+    }
+
+    try {
+      const response = await fetch(`${API_BASE}/api/sessions/${session.id}`, {
+        method: "DELETE",
+      });
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.detail || "Could not delete chat.");
+      }
+
+      const remainingSessions = sessions.filter((item) => item.id !== session.id);
+      setSessions(remainingSessions);
+
+      if (session.id === activeSession?.id) {
+        if (remainingSessions.length > 0) {
+          const nextSession = remainingSessions[0];
+          setActiveSessionId(nextSession.id);
+          openSession(nextSession);
+        } else {
+          const nextSession = await createBackendSession(GENERAL_COLLECTION_ID);
+          setSessions([nextSession]);
+          setActiveSessionId(nextSession.id);
+          setUploadResult(null);
+        }
+      }
+
+      setError("");
+    } catch (err) {
+      setError(err.message || "Could not delete chat.");
+    }
+  };
 
   const handleUpload = async () => {
-    if (!selectedFile) {
-      setError("Please select a PDF first.");
+    if (selectedFiles.length === 0) {
+      setError("Please select at least one PDF first.");
       return;
     }
 
     setError("");
     setUploading(true);
-    setUploadResult(null);
-    setAnswerResult(null);
 
     try {
       const formData = new FormData();
-      formData.append("file", selectedFile);
+      selectedFiles.forEach((file) => {
+        formData.append("files", file);
+      });
 
       const response = await fetch(`${API_BASE}/api/upload`, {
         method: "POST",
         body: formData,
       });
-
       const data = await response.json();
 
       if (!response.ok) {
@@ -52,8 +443,31 @@ function App() {
       }
 
       setUploadResult(data);
-      localStorage.setItem("document_id", data.document_id);
-        localStorage.setItem("filename", data.filename);
+      setCollections((current) => [
+        data,
+        ...current.filter((collection) => collection.collection_id !== data.collection_id),
+      ]);
+
+      const sessionForUpload =
+        sessions.find((session) => session.id === activeSessionId) ||
+        activeSession ||
+        sessions[0];
+
+      if (!sessionForUpload) {
+        throw new Error("Chat is still loading. Please try uploading again.");
+      }
+
+      const updatedSession = await updateBackendSessionCollection(
+        sessionForUpload.id,
+        data.collection_id
+      );
+      upsertSession(updatedSession);
+      setActiveSessionId(updatedSession.id);
+
+      setSelectedFiles([]);
+      if (fileInputRef.current) {
+        fileInputRef.current.value = "";
+      }
     } catch (err) {
       setError(err.message || "Upload failed.");
     } finally {
@@ -62,14 +476,48 @@ function App() {
   };
 
   const handleAsk = async () => {
-    if (!question.trim()) {
+    const trimmedQuestion = question.trim();
+
+    if (!trimmedQuestion) {
       setError("Please enter a question.");
       return;
     }
 
+    let session = activeSession;
+
+    if (!session || session.collectionId !== collectionId) {
+      try {
+        session = await createBackendSession(collectionId);
+        upsertSession(session);
+        setActiveSessionId(session.id);
+      } catch (err) {
+        setError(err.message || "Could not create chat session.");
+        return;
+      }
+    }
+
+    const sessionId = session.id;
     setError("");
     setAsking(true);
-    setAnswerResult(null);
+    setQuestion("");
+    updateSession(sessionId, (currentSession) => {
+      const nextMessages = [
+        ...currentSession.messages,
+        {
+          id: createMessageId(),
+          role: "user",
+          text: trimmedQuestion,
+        },
+      ];
+
+      return {
+        ...currentSession,
+        title: currentSession.messages.length === 0
+          ? truncateTitle(trimmedQuestion)
+          : currentSession.title,
+        messages: nextMessages,
+      };
+    });
 
     try {
       const response = await fetch(`${API_BASE}/api/ask`, {
@@ -77,19 +525,31 @@ function App() {
         headers: {
           "Content-Type": "application/json",
         },
-       body: JSON.stringify({
-        question,
-        document_id: uploadResult?.document_id
+        body: JSON.stringify({
+          question: trimmedQuestion,
+          collection_id: activeCollection?.collection_id,
+          session_id: sessionId,
         }),
       });
-
       const data = await response.json();
 
       if (!response.ok) {
         throw new Error(data.detail || "Could not generate answer.");
       }
 
-      setAnswerResult(data);
+      updateSession(sessionId, (currentSession) => ({
+        ...currentSession,
+        messages: [
+          ...currentSession.messages,
+          {
+            id: createMessageId(),
+            role: "assistant",
+            text: data.answer,
+            source: data.source,
+            citations: data.citations || [],
+          },
+        ],
+      }));
     } catch (err) {
       setError(err.message || "Could not generate answer.");
     } finally {
@@ -97,78 +557,338 @@ function App() {
     }
   };
 
+  const totalFileSize = selectedFiles.reduce((sum, file) => sum + file.size, 0);
+  const activeDocumentNames = activeCollection?.documents?.map((document) => document.filename) || [];
+
   return (
     <div className="app">
       <div className="container">
-        <header className="hero">
-          <h1>PDF Q&A Assistant</h1>
-          <p>Upload one PDF and ask natural-language questions about it.</p>
+        <header className="topbar">
+          <div>
+            <p className="eyebrow">Multi-document RAG</p>
+            <h1>Docuery AI</h1>
+          </div>
+          <div className="topbar-actions">
+            <button className="ghost-button" onClick={createNewChat} disabled={hydrating}>
+              New Chat
+            </button>
+            <button
+              className="ghost-button"
+              onClick={clearChat}
+              disabled={hydrating || !activeSession || messages.length === 0}
+            >
+              Clear Chat
+            </button>
+            <button
+              className="ghost-button"
+              onClick={() => setTheme((current) => (current === "dark" ? "light" : "dark"))}
+            >
+              {theme === "dark" ? "Light" : "Dark"}
+            </button>
+            <div className={`status-pill ${hasCollection ? "ready" : ""}`}>
+              {hydrating
+                ? "Loading chats"
+                : uploading
+                  ? "Indexing PDFs"
+                  : hasCollection
+                    ? "Documents ready"
+                    : "General chat"}
+            </div>
+          </div>
         </header>
-
-        <div className="grid">
-          <div className="card">
-            <h2>Upload PDF</h2>
-            <input
-              type="file"
-              accept="application/pdf"
-              onChange={(e) => setSelectedFile(e.target.files[0])}
-              disabled={uploading}
-            />
-            <button onClick={handleUpload} disabled={uploading}>
-              {uploading ? "Uploading PDF..." : "Upload"}
-            </button>
-
-            {uploading && (
-              <div className="loading-box">
-                <div className="spinner"></div>
-                <p>Uploading and processing PDF...</p>
-              </div>
-            )}
-
-            {uploadResult && (
-              <div className="success-box">
-                <p><strong>File:</strong> {uploadResult.filename}</p>
-                <p><strong>Pages:</strong> {uploadResult.total_pages_extracted}</p>
-                <p><strong>Chunks:</strong> {uploadResult.total_chunks}</p>
-              </div>
-            )}
-          </div>
-
-          <div className="card">
-            <h2>Ask a Question</h2>
-            <textarea
-              rows="5"
-              placeholder="Ask something about the uploaded PDF..."
-              value={question}
-              onChange={(e) => setQuestion(e.target.value)}
-              disabled={asking}
-            />
-            <button onClick={handleAsk} disabled={asking}>
-              {asking ? "Generating Answer..." : "Ask"}
-            </button>
-
-            {asking && (
-              <div className="loading-box">
-                <div className="spinner"></div>
-                <p>Generating answer...</p>
-              </div>
-            )}
-          </div>
-        </div>
 
         {error && <div className="error-box">{error}</div>}
 
-        {answerResult && (
-          <div className="card answer-card">
-            <h2>Answer</h2>
-            <div className="meta-row">
-              <span><strong>Question:</strong> {answerResult.question}</span>
+        <div className="workspace">
+          <aside className="panel upload-panel">
+            <div className="panel-header">
+              <h2>Documents</h2>
             </div>
-            <div className="answer-box">
-                <ReactMarkdown>{answerResult.answer}</ReactMarkdown>
+
+            <label
+              className={`file-picker ${draggingFile ? "dragging" : ""}`}
+              onDragEnter={(event) => {
+                event.preventDefault();
+                setDraggingFile(true);
+              }}
+              onDragOver={(event) => {
+                event.preventDefault();
+                setDraggingFile(true);
+              }}
+              onDragLeave={() => setDraggingFile(false)}
+              onDrop={(event) => {
+                event.preventDefault();
+                setDraggingFile(false);
+                selectFiles(event.dataTransfer.files);
+              }}
+            >
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="application/pdf"
+                multiple
+                onChange={(event) => selectFiles(event.target.files)}
+                disabled={hydrating || uploading}
+              />
+              <span className="file-picker-title">
+                {selectedFiles.length > 0
+                  ? `${selectedFiles.length} PDF${selectedFiles.length === 1 ? "" : "s"} selected`
+                  : "Choose or Drop PDFs"}
+              </span>
+              <span className="file-picker-subtitle">
+                {selectedFiles.length > 0
+                  ? `${Math.max(totalFileSize / 1024 / 1024, 0.01).toFixed(2)} MB total`
+                  : "Multiple PDFs supported"}
+              </span>
+            </label>
+
+            {selectedFiles.length > 0 && (
+              <div className="file-list">
+                {selectedFiles.map((file) => (
+                  <span key={`${file.name}-${file.size}`}>{file.name}</span>
+                ))}
+              </div>
+            )}
+
+            <button
+              className="primary-button"
+              onClick={handleUpload}
+              disabled={hydrating || uploading || selectedFiles.length === 0}
+            >
+              {uploading ? "Indexing..." : "Upload and Index"}
+            </button>
+
+            {uploading && (
+              <div className="upload-progress">
+                <div className="spinner"></div>
+                <div>
+                  <strong>Preparing documents</strong>
+                  <span>You can keep typing while this runs.</span>
+                </div>
+              </div>
+            )}
+
+            {activeCollection && (
+              <div className="document-summary">
+                <p className="summary-label">Selected Documents</p>
+                <h3>
+                  {activeCollection.total_files === 1
+                    ? activeDocumentNames[0]
+                    : `${activeCollection.total_files} PDFs`}
+                </h3>
+                <div className="metrics">
+                  <span>
+                    <strong>{activeCollection.total_pages_extracted || "-"}</strong>
+                    Pages
+                  </span>
+                  <span>
+                    <strong>{activeCollection.total_files || "-"}</strong>
+                    Files
+                  </span>
+                </div>
+                <div className="document-list">
+                  {activeCollection.documents?.map((document) => (
+                    <span key={document.document_id}>
+                      {document.filename} · {document.total_pages_extracted} pages
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div className="collection-list">
+              <div className="session-list-header">
+                <p className="summary-label">Documents</p>
+              </div>
+              {collections.length === 0 && (
+                <div className="empty-list">No PDFs uploaded yet.</div>
+              )}
+              {collections.map((collection) => {
+                const collectionSessions = sessions.filter(
+                  (session) => session.collectionId === collection.collection_id
+                );
+
+                return (
+                  <button
+                    key={collection.collection_id}
+                    className={`collection-item ${
+                      activeCollection?.collection_id === collection.collection_id ? "active" : ""
+                    }`}
+                    onClick={() => openCollection(collection)}
+                  >
+                    <span>{getCollectionTitle(collection)}</span>
+                    <small>
+                      {formatCount(collection.total_files, "file")} ·{" "}
+                      {formatCount(collectionSessions.length, "chat")}
+                    </small>
+                  </button>
+                );
+              })}
             </div>
-          </div>
-        )}
+
+            <div className="session-list">
+              <div className="session-list-header">
+                <p className="summary-label">Chats</p>
+                <button className="small-button" onClick={createNewChat} disabled={hydrating}>
+                  New
+                </button>
+              </div>
+              {sessions.map((session) => (
+                <div
+                  key={session.id}
+                  className={`session-item ${session.id === activeSession?.id ? "active" : ""}`}
+                  role="button"
+                  tabIndex="0"
+                  onClick={() => openSession(session)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      openSession(session);
+                    }
+                  }}
+                >
+                  <div className="session-main">
+                    <span>{session.title}</span>
+                    <small>
+                      {formatCount(session.messages.length, "message")} ·{" "}
+                      {getSessionContextLabel(session, collections)}
+                    </small>
+                  </div>
+                  <div className="session-actions">
+                    <button
+                      className="mini-button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        renameChat(session);
+                      }}
+                    >
+                      Rename
+                    </button>
+                    <button
+                      className="mini-button danger"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        deleteChat(session);
+                      }}
+                    >
+                      Delete
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div className="prompt-bank">
+              <p className="summary-label">Try</p>
+              <div className="prompt-list">
+                {promptSuggestions.map((prompt) => (
+                  <button key={prompt} className="prompt-chip" onClick={() => usePrompt(prompt)}>
+                    {prompt}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </aside>
+
+          <main className="panel chat-panel">
+            <div className="chat-header">
+              <div>
+                <h2>{activeSession?.title || "Ask Questions"}</h2>
+                <p>
+                  {hasCollection
+                    ? activeDocumentNames.join(", ")
+                    : "General chat without PDFs."}
+                </p>
+              </div>
+              <div className="mini-stats">
+                <span>{messages.filter((message) => message.role === "assistant").length}</span>
+                {messages.filter((message) => message.role === "assistant").length === 1
+                  ? "Answer"
+                  : "Answers"}
+              </div>
+            </div>
+
+            <div className="messages">
+              {messages.length === 0 && (
+                <div className="empty-state">
+                  <h3>{hydrating ? "Loading chats..." : "Start a chat."}</h3>
+                  <p>
+                    {hydrating
+                      ? "Saved chats and documents are loading from the backend."
+                      : "Each chat keeps its own context. Select any chat on the left to continue it."}
+                  </p>
+                </div>
+              )}
+
+              {messages.map((message) => (
+                <article key={message.id} className={`message ${message.role}`}>
+                  <div className="message-label">
+                    {message.role === "user" ? "You" : "Assistant"}
+                  </div>
+                  <div className="message-bubble">{message.text}</div>
+
+                  {message.role === "assistant" && message.source && (
+                    <div className={`source-badge ${message.source}`}>
+                      {message.source === "general"
+                        ? "General answer"
+                        : message.source === "no_match"
+                          ? "No document match"
+                          : "Document answer"}
+                    </div>
+                  )}
+
+                  {message.citations?.length > 0 && (
+                    <div className="page-citations">
+                      {message.citations.map((citation) => (
+                        <span key={`${citation.filename}-${citation.page}`}>
+                          {citation.filename}, p. {citation.page}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </article>
+              ))}
+
+              {asking && (
+                <div className="loading-row answer-loading">
+                  <div className="spinner"></div>
+                  <span>Thinking...</span>
+                </div>
+              )}
+              <div ref={messagesEndRef} />
+            </div>
+
+            <form
+              className="ask-form"
+              onSubmit={(event) => {
+                event.preventDefault();
+                handleAsk();
+              }}
+            >
+              <textarea
+                ref={questionRef}
+                rows="3"
+                placeholder={
+                  hasCollection
+                    ? "Ask across the uploaded PDFs or anything general..."
+                    : "Ask a general question..."
+                }
+                value={question}
+                onChange={(event) => setQuestion(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && !event.shiftKey) {
+                    event.preventDefault();
+                    handleAsk();
+                  }
+                }}
+                disabled={hydrating || asking}
+              />
+              <button className="primary-button" disabled={hydrating || asking}>
+                {asking ? "Answering..." : "Ask"}
+              </button>
+            </form>
+          </main>
+        </div>
       </div>
     </div>
   );
