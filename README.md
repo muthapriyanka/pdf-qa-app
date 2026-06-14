@@ -1,15 +1,3 @@
----
-title: Docuery AI
-emoji: 📄
-colorFrom: green
-colorTo: blue
-sdk: docker
-app_port: 7860
-pinned: false
-hf_oauth: true
-hf_oauth_expiration_minutes: 43200
----
-
 # Docuery AI
 
 Docuery AI is a full-stack, multi-document RAG assistant that lets users upload
