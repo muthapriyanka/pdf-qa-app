@@ -33,16 +33,24 @@ def create_vector_store(chunks, ids: list[str] | None = None):
 def search_vector_store(
     vector_store,
     question: str,
+    user_id: str | None = None,
     collection_id: str | None = None,
     document_id: str | None = None,
     top_k: int = 3,
 ):
+    filters = []
+
+    if user_id:
+        filters.append({"user_id": user_id})
+
     if collection_id:
-        search_filter = {"collection_id": collection_id}
+        filters.append({"collection_id": collection_id})
     elif document_id:
-        search_filter = {"document_id": document_id}
+        filters.append({"document_id": document_id})
     else:
         return []
+
+    search_filter = filters[0] if len(filters) == 1 else {"$and": filters}
 
     return vector_store.similarity_search_with_score(
         question,

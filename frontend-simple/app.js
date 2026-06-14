@@ -47,9 +47,20 @@ function getInitialState() {
     collection: null,
     collections: [],
     sessions: [],
-    activeSessionId: localStorage.getItem(STORAGE_KEYS.activeSessionId) || "",
+    activeSessionId: "",
     theme: localStorage.getItem(STORAGE_KEYS.theme) || "dark",
   };
+}
+
+function getActiveSessionStorageKey(user) {
+  return `${STORAGE_KEYS.activeSessionId}:${user?.user_id || "anonymous"}`;
+}
+
+function apiFetch(path, options = {}) {
+  return fetch(`${API_BASE}${path}`, {
+    credentials: "include",
+    ...options,
+  });
 }
 
 function truncateTitle(text) {
@@ -101,10 +112,14 @@ function App() {
   const [collections, setCollections] = useState(initialState.collections);
   const [sessions, setSessions] = useState(initialState.sessions);
   const [activeSessionId, setActiveSessionId] = useState(initialState.activeSessionId);
+  const [auth, setAuth] = useState(null);
   const messagesEndRef = useRef(null);
   const questionRef = useRef(null);
   const fileInputRef = useRef(null);
 
+  const isAuthenticated = Boolean(auth?.authenticated);
+  const authIsReady = auth !== null;
+  const currentUser = auth?.user || null;
   const activeSession = sessions.find((session) => session.id === activeSessionId) || sessions[0] || null;
   const collectionId = activeSession?.collectionId || uploadResult?.collection_id || GENERAL_COLLECTION_ID;
   const activeCollection =
@@ -124,7 +139,7 @@ function App() {
   };
 
   const createBackendSession = async (targetCollectionId = collectionId, title = "Chat") => {
-    const response = await fetch(`${API_BASE}/api/sessions`, {
+    const response = await apiFetch("/api/sessions", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -144,7 +159,7 @@ function App() {
   };
 
   const updateBackendSessionCollection = async (sessionId, targetCollectionId) => {
-    const response = await fetch(`${API_BASE}/api/sessions/${sessionId}`, {
+    const response = await apiFetch(`/api/sessions/${sessionId}`, {
       method: "PATCH",
       headers: {
         "Content-Type": "application/json",
@@ -174,10 +189,41 @@ function App() {
       setHydrating(true);
 
       try {
-        const response = await fetch(`${API_BASE}/api/state`);
+        const authResponse = await apiFetch("/api/auth/status");
+        const authData = await authResponse.json();
+
+        if (!authResponse.ok) {
+          throw new Error(authData.detail || "Could not check sign-in status.");
+        }
+
+        if (cancelled) {
+          return;
+        }
+
+        setAuth(authData);
+
+        if (!authData.authenticated) {
+          setCollections([]);
+          setSessions([]);
+          setUploadResult(null);
+          setActiveSessionId("");
+          return;
+        }
+
+        const response = await apiFetch("/api/state");
         const data = await response.json();
 
         if (!response.ok) {
+          if (response.status === 401) {
+            setAuth({
+              authenticated: false,
+              required: true,
+              configured: true,
+              user: null,
+            });
+            return;
+          }
+
           throw new Error(data.detail || "Could not load saved chats.");
         }
 
@@ -193,7 +239,9 @@ function App() {
         }
 
         const nextCollections = data.collections || [];
-        const storedActiveSessionId = localStorage.getItem(STORAGE_KEYS.activeSessionId);
+        const storedActiveSessionId = localStorage.getItem(
+          getActiveSessionStorageKey(authData.user)
+        );
         const nextActiveSession =
           nextSessions.find((session) => session.id === storedActiveSessionId) ||
           nextSessions[0];
@@ -227,10 +275,10 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (activeSessionId) {
-      localStorage.setItem(STORAGE_KEYS.activeSessionId, activeSessionId);
+    if (activeSessionId && currentUser) {
+      localStorage.setItem(getActiveSessionStorageKey(currentUser), activeSessionId);
     }
-  }, [activeSessionId]);
+  }, [activeSessionId, currentUser]);
 
   useEffect(() => {
     if (!sessions.some((session) => session.id === activeSessionId)) {
@@ -329,7 +377,7 @@ function App() {
     }
 
     try {
-      const response = await fetch(`${API_BASE}/api/sessions/${activeSession.id}/messages`, {
+      const response = await apiFetch(`/api/sessions/${activeSession.id}/messages`, {
         method: "DELETE",
       });
       const data = await response.json();
@@ -360,7 +408,7 @@ function App() {
     }
 
     try {
-      const response = await fetch(`${API_BASE}/api/sessions/${session.id}`, {
+      const response = await apiFetch(`/api/sessions/${session.id}`, {
         method: "PATCH",
         headers: {
           "Content-Type": "application/json",
@@ -386,7 +434,7 @@ function App() {
     }
 
     try {
-      const response = await fetch(`${API_BASE}/api/sessions/${session.id}`, {
+      const response = await apiFetch(`/api/sessions/${session.id}`, {
         method: "DELETE",
       });
       const data = await response.json();
@@ -432,7 +480,7 @@ function App() {
         formData.append("files", file);
       });
 
-      const response = await fetch(`${API_BASE}/api/upload`, {
+      const response = await apiFetch("/api/upload", {
         method: "POST",
         body: formData,
       });
@@ -520,7 +568,7 @@ function App() {
     });
 
     try {
-      const response = await fetch(`${API_BASE}/api/ask`, {
+      const response = await apiFetch("/api/ask", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -557,6 +605,35 @@ function App() {
     }
   };
 
+  const signIn = () => {
+    window.location.href = `${API_BASE}/api/auth/login`;
+  };
+
+  const signOut = async () => {
+    try {
+      await apiFetch("/api/auth/logout", { method: "POST" });
+    } catch (err) {
+      // The local UI should still clear even if the server session already expired.
+    }
+
+    if (currentUser) {
+      localStorage.removeItem(getActiveSessionStorageKey(currentUser));
+    }
+
+    setAuth({
+      authenticated: false,
+      required: true,
+      configured: true,
+      user: null,
+    });
+    setCollections([]);
+    setSessions([]);
+    setUploadResult(null);
+    setActiveSessionId("");
+    setSelectedFiles([]);
+    setQuestion("");
+  };
+
   const totalFileSize = selectedFiles.reduce((sum, file) => sum + file.size, 0);
   const activeDocumentNames = activeCollection?.documents?.map((document) => document.filename) || [];
 
@@ -569,36 +646,88 @@ function App() {
             <h1>Docuery AI</h1>
           </div>
           <div className="topbar-actions">
-            <button className="ghost-button" onClick={createNewChat} disabled={hydrating}>
-              New Chat
-            </button>
-            <button
-              className="ghost-button"
-              onClick={clearChat}
-              disabled={hydrating || !activeSession || messages.length === 0}
-            >
-              Clear Chat
-            </button>
+            {isAuthenticated && (
+              <>
+                <button className="ghost-button" onClick={createNewChat} disabled={hydrating}>
+                  New Chat
+                </button>
+                <button
+                  className="ghost-button"
+                  onClick={clearChat}
+                  disabled={hydrating || !activeSession || messages.length === 0}
+                >
+                  Clear Chat
+                </button>
+              </>
+            )}
             <button
               className="ghost-button"
               onClick={() => setTheme((current) => (current === "dark" ? "light" : "dark"))}
             >
               {theme === "dark" ? "Light" : "Dark"}
             </button>
-            <div className={`status-pill ${hasCollection ? "ready" : ""}`}>
-              {hydrating
-                ? "Loading chats"
-                : uploading
-                  ? "Indexing PDFs"
-                  : hasCollection
-                    ? "Documents ready"
-                    : "General chat"}
-            </div>
+            {isAuthenticated && currentUser && (
+              <div className="user-pill">
+                {currentUser.avatar_url && (
+                  <img src={currentUser.avatar_url} alt="" />
+                )}
+                <span>{currentUser.username}</span>
+              </div>
+            )}
+            {isAuthenticated && (
+              <div className={`status-pill ${hasCollection ? "ready" : ""}`}>
+                {hydrating
+                  ? "Loading chats"
+                  : uploading
+                    ? "Indexing PDFs"
+                    : hasCollection
+                      ? "Documents ready"
+                      : "General chat"}
+              </div>
+            )}
+            {isAuthenticated && auth?.required && (
+              <button className="ghost-button" onClick={signOut}>
+                Sign Out
+              </button>
+            )}
           </div>
         </header>
 
         {error && <div className="error-box">{error}</div>}
 
+        {!authIsReady ? (
+          <section className="panel auth-panel">
+            <div>
+              <div className="loading-row centered">
+                <div className="spinner"></div>
+                <span>Loading private workspace...</span>
+              </div>
+            </div>
+          </section>
+        ) : !isAuthenticated ? (
+          <section className="panel auth-panel">
+            <div>
+              <p className="eyebrow">Private Workspace</p>
+              <h2>Sign in to use Docuery AI</h2>
+              <p>
+                Your uploaded PDFs, document collections, and chat history stay tied
+                to your Hugging Face account.
+              </p>
+              {auth?.required && !auth?.configured && (
+                <div className="error-box">
+                  Hugging Face OAuth is not configured for this deployment yet.
+                </div>
+              )}
+              <button
+                className="primary-button auth-button"
+                onClick={signIn}
+                disabled={auth?.required && !auth?.configured}
+              >
+                Sign in with Hugging Face
+              </button>
+            </div>
+          </section>
+        ) : (
         <div className="workspace">
           <aside className="panel upload-panel">
             <div className="panel-header">
@@ -889,6 +1018,7 @@ function App() {
             </form>
           </main>
         </div>
+        )}
       </div>
     </div>
   );

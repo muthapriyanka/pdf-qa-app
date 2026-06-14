@@ -126,6 +126,34 @@ h3 {
   border-color: #115e59;
 }
 
+.user-pill {
+  display: inline-flex;
+  align-items: center;
+  max-width: 220px;
+  gap: 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 6px 10px;
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.user-pill img {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  object-fit: cover;
+}
+
+.user-pill span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .ghost-button {
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -171,6 +199,31 @@ h3 {
   display: grid;
   grid-template-rows: auto minmax(420px, 1fr) auto;
   min-height: calc(100vh - 150px);
+}
+
+.auth-panel {
+  display: grid;
+  place-items: center;
+  min-height: min(560px, calc(100vh - 150px));
+  padding: 48px 20px;
+  text-align: center;
+}
+
+.auth-panel > div {
+  width: min(100%, 440px);
+}
+
+.auth-panel h2 {
+  font-size: 28px;
+}
+
+.auth-panel p {
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.auth-button {
+  margin-top: 8px;
 }
 
 .panel-header {
@@ -698,6 +751,10 @@ textarea:disabled {
   color: var(--muted);
   font-size: 14px;
   line-height: 1.4;
+}
+
+.loading-row.centered {
+  justify-content: center;
 }
 
 .answer-loading {

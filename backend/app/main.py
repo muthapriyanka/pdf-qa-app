@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
+from app.routes.auth import router as auth_router
 from app.routes.upload import router as upload_router
 from app.routes.ask import router as ask_router
 from app.routes.sessions import router as sessions_router
@@ -33,6 +34,7 @@ app.add_middleware(
 def health():
     return {"status": "ok"}
 
+app.include_router(auth_router, prefix="/api")
 app.include_router(upload_router, prefix="/api")
 app.include_router(ask_router, prefix="/api")
 app.include_router(sessions_router, prefix="/api")

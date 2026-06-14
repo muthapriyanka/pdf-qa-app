@@ -8,6 +8,7 @@ from typing import Any
 
 
 MAX_HISTORY_TURNS = 6
+LEGACY_USER_ID = "legacy-user"
 APP_DATA_DIR = os.getenv("APP_DATA_DIR")
 DATABASE_PATH = Path(
     os.getenv(
@@ -41,12 +42,44 @@ def _connect() -> sqlite3.Connection:
     return connection
 
 
+def _column_exists(connection: sqlite3.Connection, table: str, column: str) -> bool:
+    rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
+    return any(row["name"] == column for row in rows)
+
+
+def _ensure_column(
+    connection: sqlite3.Connection,
+    table: str,
+    column: str,
+    definition: str,
+) -> None:
+    if not _column_exists(connection, table, column):
+        connection.execute(f"ALTER TABLE {table} ADD COLUMN {definition}")
+
+
 def initialize_database() -> None:
     with _connect() as connection:
         connection.executescript(
             """
+            CREATE TABLE IF NOT EXISTS users (
+                user_id TEXT PRIMARY KEY,
+                username TEXT NOT NULL,
+                avatar_url TEXT,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS auth_sessions (
+                session_token TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                username TEXT NOT NULL,
+                avatar_url TEXT,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS collections (
                 collection_id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL DEFAULT 'legacy-user',
                 total_files INTEGER NOT NULL,
                 total_pages_extracted INTEGER NOT NULL,
                 total_chunks INTEGER NOT NULL,
@@ -66,6 +99,7 @@ def initialize_database() -> None:
 
             CREATE TABLE IF NOT EXISTS chat_sessions (
                 session_id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL DEFAULT 'legacy-user',
                 collection_id TEXT,
                 title TEXT NOT NULL,
                 created_at TEXT NOT NULL,
@@ -97,6 +131,41 @@ def initialize_database() -> None:
 
             CREATE INDEX IF NOT EXISTS idx_chat_messages_session_position
                 ON chat_messages(session_id, position);
+
+            CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires
+                ON auth_sessions(expires_at);
+            """
+        )
+        _ensure_column(
+            connection,
+            "collections",
+            "user_id",
+            "user_id TEXT NOT NULL DEFAULT 'legacy-user'",
+        )
+        _ensure_column(
+            connection,
+            "chat_sessions",
+            "user_id",
+            "user_id TEXT NOT NULL DEFAULT 'legacy-user'",
+        )
+        connection.execute(
+            "UPDATE collections SET user_id = ? WHERE user_id IS NULL OR user_id = ''",
+            (LEGACY_USER_ID,),
+        )
+        connection.execute(
+            "UPDATE chat_sessions SET user_id = ? WHERE user_id IS NULL OR user_id = ''",
+            (LEGACY_USER_ID,),
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_collections_user_uploaded
+            ON collections(user_id, uploaded_at DESC)
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_chat_sessions_user_updated
+            ON chat_sessions(user_id, updated_at DESC)
             """
         )
 
@@ -155,6 +224,7 @@ def _collection_from_row(
 
     return {
         "collection_id": row["collection_id"],
+        "user_id": row["user_id"],
         "documents": [_row_to_document(document) for document in document_rows],
         "total_files": row["total_files"],
         "total_pages_extracted": row["total_pages_extracted"],
@@ -184,6 +254,7 @@ def _session_from_row(
 
     return {
         "session_id": row["session_id"],
+        "user_id": row["user_id"],
         "collection_id": row["collection_id"],
         "title": row["title"],
         "messages": messages,
@@ -207,6 +278,7 @@ def _refresh_document_store(collection: dict[str, Any]) -> None:
 
 
 def save_collection_metadata(
+    user_id: str,
     collection_id: str,
     documents: list[dict[str, Any]],
 ) -> dict[str, Any]:
@@ -219,19 +291,28 @@ def save_collection_metadata(
             """
             INSERT INTO collections (
                 collection_id,
+                user_id,
                 total_files,
                 total_pages_extracted,
                 total_chunks,
                 uploaded_at
             )
-            VALUES (?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(collection_id) DO UPDATE SET
+                user_id = excluded.user_id,
                 total_files = excluded.total_files,
                 total_pages_extracted = excluded.total_pages_extracted,
                 total_chunks = excluded.total_chunks,
                 uploaded_at = excluded.uploaded_at
             """,
-            (collection_id, len(documents), total_pages, total_chunks, uploaded_at),
+            (
+                collection_id,
+                user_id,
+                len(documents),
+                total_pages,
+                total_chunks,
+                uploaded_at,
+            ),
         )
         connection.execute(
             "DELETE FROM documents WHERE collection_id = ?",
@@ -259,7 +340,7 @@ def save_collection_metadata(
                 ),
             )
 
-    metadata = get_collection_metadata(collection_id)
+    metadata = get_collection_metadata(user_id, collection_id)
 
     if metadata:
         _refresh_document_store(metadata)
@@ -268,62 +349,71 @@ def save_collection_metadata(
     raise RuntimeError("Collection metadata was not saved.")
 
 
-def get_collection_metadata(collection_id: str) -> dict[str, Any] | None:
+def get_collection_metadata(
+    user_id: str,
+    collection_id: str,
+) -> dict[str, Any] | None:
     with _connect() as connection:
         row = connection.execute(
             """
-            SELECT collection_id, total_files, total_pages_extracted, total_chunks, uploaded_at
+            SELECT collection_id, user_id, total_files, total_pages_extracted, total_chunks, uploaded_at
             FROM collections
-            WHERE collection_id = ?
+            WHERE collection_id = ? AND user_id = ?
             """,
-            (collection_id,),
+            (collection_id, user_id),
         ).fetchone()
 
         return _collection_from_row(connection, row) if row else None
 
 
-def list_collection_metadata() -> list[dict[str, Any]]:
+def list_collection_metadata(user_id: str) -> list[dict[str, Any]]:
     with _connect() as connection:
         rows = connection.execute(
             """
-            SELECT collection_id, total_files, total_pages_extracted, total_chunks, uploaded_at
+            SELECT collection_id, user_id, total_files, total_pages_extracted, total_chunks, uploaded_at
             FROM collections
+            WHERE user_id = ?
             ORDER BY uploaded_at DESC
-            """
+            """,
+            (user_id,),
         ).fetchall()
 
         return [_collection_from_row(connection, row) for row in rows]
 
 
-def get_latest_collection_id() -> str | None:
+def get_latest_collection_id(user_id: str) -> str | None:
     with _connect() as connection:
         row = connection.execute(
             """
             SELECT collection_id
             FROM collections
+            WHERE user_id = ?
             ORDER BY uploaded_at DESC
             LIMIT 1
-            """
+            """,
+            (user_id,),
         ).fetchone()
 
         return row["collection_id"] if row else None
 
 
-def get_document_metadata(document_id: str) -> dict[str, Any] | None:
+def get_document_metadata(user_id: str, document_id: str) -> dict[str, Any] | None:
     with _connect() as connection:
         row = connection.execute(
             """
-            SELECT document_id, collection_id, filename, total_pages_extracted, total_chunks
-            FROM documents
-            WHERE document_id = ?
+            SELECT d.document_id, d.collection_id, d.filename, d.total_pages_extracted, d.total_chunks
+            FROM documents d
+            JOIN collections c ON c.collection_id = d.collection_id
+            WHERE d.document_id = ? AND c.user_id = ?
             """,
-            (document_id,),
+            (document_id, user_id),
         ).fetchone()
 
         return _row_to_document(row) if row else None
 
 
 def create_chat_session(
+    user_id: str,
     collection_id: str | None = None,
     title: str | None = None,
     session_id: str | None = None,
@@ -337,56 +427,66 @@ def create_chat_session(
             """
             INSERT INTO chat_sessions (
                 session_id,
+                user_id,
                 collection_id,
                 title,
                 created_at,
                 updated_at
             )
-            VALUES (?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(session_id) DO NOTHING
             """,
-            (next_session_id, normalized_collection_id, title or "Chat", now, now),
+            (
+                next_session_id,
+                user_id,
+                normalized_collection_id,
+                title or "Chat",
+                now,
+                now,
+            ),
         )
         row = connection.execute(
             """
-            SELECT session_id, collection_id, title, created_at, updated_at
+            SELECT session_id, user_id, collection_id, title, created_at, updated_at
             FROM chat_sessions
-            WHERE session_id = ?
+            WHERE session_id = ? AND user_id = ?
             """,
-            (next_session_id,),
+            (next_session_id, user_id),
         ).fetchone()
 
         return _session_from_row(connection, row)
 
 
-def list_chat_sessions() -> list[dict[str, Any]]:
+def list_chat_sessions(user_id: str) -> list[dict[str, Any]]:
     with _connect() as connection:
         rows = connection.execute(
             """
-            SELECT session_id, collection_id, title, created_at, updated_at
+            SELECT session_id, user_id, collection_id, title, created_at, updated_at
             FROM chat_sessions
+            WHERE user_id = ?
             ORDER BY updated_at DESC, created_at DESC
-            """
+            """,
+            (user_id,),
         ).fetchall()
 
         return [_session_from_row(connection, row) for row in rows]
 
 
-def get_chat_session(session_id: str) -> dict[str, Any] | None:
+def get_chat_session(user_id: str, session_id: str) -> dict[str, Any] | None:
     with _connect() as connection:
         row = connection.execute(
             """
-            SELECT session_id, collection_id, title, created_at, updated_at
+            SELECT session_id, user_id, collection_id, title, created_at, updated_at
             FROM chat_sessions
-            WHERE session_id = ?
+            WHERE session_id = ? AND user_id = ?
             """,
-            (session_id,),
+            (session_id, user_id),
         ).fetchone()
 
         return _session_from_row(connection, row) if row else None
 
 
-def clear_chat_messages(session_id: str) -> dict[str, Any] | None:
+def clear_chat_messages(user_id: str, session_id: str) -> dict[str, Any] | None:
     now = _utc_now()
 
     with _connect() as connection:
@@ -394,9 +494,9 @@ def clear_chat_messages(session_id: str) -> dict[str, Any] | None:
             """
             SELECT session_id
             FROM chat_sessions
-            WHERE session_id = ?
+            WHERE session_id = ? AND user_id = ?
             """,
-            (session_id,),
+            (session_id, user_id),
         ).fetchone()
 
         if not session:
@@ -417,17 +517,21 @@ def clear_chat_messages(session_id: str) -> dict[str, Any] | None:
 
         row = connection.execute(
             """
-            SELECT session_id, collection_id, title, created_at, updated_at
+            SELECT session_id, user_id, collection_id, title, created_at, updated_at
             FROM chat_sessions
-            WHERE session_id = ?
+            WHERE session_id = ? AND user_id = ?
             """,
-            (session_id,),
+            (session_id, user_id),
         ).fetchone()
 
         return _session_from_row(connection, row)
 
 
-def rename_chat_session(session_id: str, title: str) -> dict[str, Any] | None:
+def rename_chat_session(
+    user_id: str,
+    session_id: str,
+    title: str,
+) -> dict[str, Any] | None:
     normalized_title = title.strip()[:80]
     now = _utc_now()
 
@@ -439,23 +543,24 @@ def rename_chat_session(session_id: str, title: str) -> dict[str, Any] | None:
             """
             UPDATE chat_sessions
             SET title = ?, updated_at = ?
-            WHERE session_id = ?
+            WHERE session_id = ? AND user_id = ?
             """,
-            (normalized_title, now, session_id),
+            (normalized_title, now, session_id, user_id),
         )
         row = connection.execute(
             """
-            SELECT session_id, collection_id, title, created_at, updated_at
+            SELECT session_id, user_id, collection_id, title, created_at, updated_at
             FROM chat_sessions
-            WHERE session_id = ?
+            WHERE session_id = ? AND user_id = ?
             """,
-            (session_id,),
+            (session_id, user_id),
         ).fetchone()
 
         return _session_from_row(connection, row) if row else None
 
 
 def update_chat_session(
+    user_id: str,
     session_id: str,
     title: str | None = None,
     collection_id: str | None = None,
@@ -472,9 +577,9 @@ def update_chat_session(
             """
             SELECT session_id
             FROM chat_sessions
-            WHERE session_id = ?
+            WHERE session_id = ? AND user_id = ?
             """,
-            (session_id,),
+            (session_id, user_id),
         ).fetchone()
 
         if not row:
@@ -486,43 +591,44 @@ def update_chat_session(
             SET title = COALESCE(?, title),
                 collection_id = ?,
                 updated_at = ?
-            WHERE session_id = ?
+            WHERE session_id = ? AND user_id = ?
             """,
-            (normalized_title, normalized_collection_id, now, session_id),
+            (normalized_title, normalized_collection_id, now, session_id, user_id),
         )
         updated_row = connection.execute(
             """
-            SELECT session_id, collection_id, title, created_at, updated_at
+            SELECT session_id, user_id, collection_id, title, created_at, updated_at
             FROM chat_sessions
-            WHERE session_id = ?
+            WHERE session_id = ? AND user_id = ?
             """,
-            (session_id,),
+            (session_id, user_id),
         ).fetchone()
 
         return _session_from_row(connection, updated_row)
 
 
-def delete_chat_session(session_id: str) -> bool:
+def delete_chat_session(user_id: str, session_id: str) -> bool:
     with _connect() as connection:
         cursor = connection.execute(
-            "DELETE FROM chat_sessions WHERE session_id = ?",
-            (session_id,),
+            "DELETE FROM chat_sessions WHERE session_id = ? AND user_id = ?",
+            (session_id, user_id),
         )
 
         return cursor.rowcount > 0
 
 
-def get_chat_history(session_id: str) -> list[dict[str, str]]:
+def get_chat_history(user_id: str, session_id: str) -> list[dict[str, str]]:
     with _connect() as connection:
         rows = connection.execute(
             """
-            SELECT role, text
-            FROM chat_messages
-            WHERE session_id = ?
-            ORDER BY position DESC
+            SELECT m.role, m.text
+            FROM chat_messages m
+            JOIN chat_sessions s ON s.session_id = m.session_id
+            WHERE m.session_id = ? AND s.user_id = ?
+            ORDER BY m.position DESC
             LIMIT ?
             """,
-            (session_id, MAX_HISTORY_TURNS * 2),
+            (session_id, user_id, MAX_HISTORY_TURNS * 2),
         ).fetchall()
 
     ordered_rows = list(reversed(rows))
@@ -540,6 +646,7 @@ def get_chat_history(session_id: str) -> list[dict[str, str]]:
 
 
 def append_chat_turn(
+    user_id: str,
     session_id: str,
     collection_id: str | None,
     question: str,
@@ -553,27 +660,32 @@ def append_chat_turn(
     with _connect() as connection:
         session = connection.execute(
             """
-            SELECT session_id, collection_id, title
+            SELECT session_id, user_id, collection_id, title
             FROM chat_sessions
             WHERE session_id = ?
             """,
             (session_id,),
         ).fetchone()
 
+        if session and session["user_id"] != user_id:
+            raise ValueError("Chat session does not belong to this user.")
+
         if not session:
             connection.execute(
                 """
                 INSERT INTO chat_sessions (
                     session_id,
+                    user_id,
                     collection_id,
                     title,
                     created_at,
                     updated_at
                 )
-                VALUES (?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
                     session_id,
+                    user_id,
                     normalized_collection_id,
                     question[:44],
                     now,
@@ -660,9 +772,106 @@ def append_chat_turn(
             """
             UPDATE chat_sessions
             SET collection_id = ?, updated_at = ?
-            WHERE session_id = ?
+            WHERE session_id = ? AND user_id = ?
             """,
-            (normalized_collection_id, now, session_id),
+            (normalized_collection_id, now, session_id, user_id),
+        )
+
+
+def upsert_user(user: dict[str, Any]) -> dict[str, Any]:
+    now = _utc_now()
+    user_id = str(user["user_id"])
+    username = str(user.get("username") or "Hugging Face User")
+    avatar_url = user.get("avatar_url")
+
+    with _connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO users (user_id, username, avatar_url, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                username = excluded.username,
+                avatar_url = excluded.avatar_url,
+                updated_at = excluded.updated_at
+            """,
+            (user_id, username, avatar_url, now),
+        )
+
+    return {
+        "user_id": user_id,
+        "username": username,
+        "avatar_url": avatar_url,
+    }
+
+
+def create_auth_session(
+    session_token: str,
+    user: dict[str, Any],
+    expires_at: str,
+) -> dict[str, Any]:
+    stored_user = upsert_user(user)
+    now = _utc_now()
+
+    with _connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO auth_sessions (
+                session_token,
+                user_id,
+                username,
+                avatar_url,
+                created_at,
+                expires_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(session_token) DO UPDATE SET
+                user_id = excluded.user_id,
+                username = excluded.username,
+                avatar_url = excluded.avatar_url,
+                expires_at = excluded.expires_at
+            """,
+            (
+                session_token,
+                stored_user["user_id"],
+                stored_user["username"],
+                stored_user.get("avatar_url"),
+                now,
+                expires_at,
+            ),
+        )
+
+    return stored_user
+
+
+def get_auth_session(session_token: str) -> dict[str, Any] | None:
+    now = _utc_now()
+
+    with _connect() as connection:
+        row = connection.execute(
+            """
+            SELECT user_id, username, avatar_url, expires_at
+            FROM auth_sessions
+            WHERE session_token = ? AND expires_at > ?
+            """,
+            (session_token, now),
+        ).fetchone()
+
+    if not row:
+        return None
+
+    return {
+        "user_id": row["user_id"],
+        "username": row["username"],
+        "avatar_url": row["avatar_url"],
+        "expires_at": row["expires_at"],
+    }
+
+
+def delete_auth_session(session_token: str) -> None:
+    with _connect() as connection:
+        connection.execute(
+            "DELETE FROM auth_sessions WHERE session_token = ?",
+            (session_token,),
         )
 
 

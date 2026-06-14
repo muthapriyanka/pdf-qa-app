@@ -1,7 +1,8 @@
 import uuid
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 
+from app.auth import get_current_user
 from app.services.chunker import split_documents
 from app.services.pdf_parser import load_pdf_documents
 from app.services.vector_store import create_vector_store
@@ -32,7 +33,10 @@ def _validate_pdf(file: UploadFile) -> None:
 
 
 @router.post("/upload")
-async def upload_pdfs(files: list[UploadFile] = File(...)):
+async def upload_pdfs(
+    files: list[UploadFile] = File(...),
+    user: dict = Depends(get_current_user),
+):
     if not files:
         raise HTTPException(status_code=400, detail="Upload at least one PDF.")
 
@@ -74,6 +78,7 @@ async def upload_pdfs(files: list[UploadFile] = File(...)):
                 chunk_id = f"{collection_id}:{document_id}:{index}"
                 chunk.metadata.update(
                     {
+                        "user_id": user["user_id"],
                         "collection_id": collection_id,
                         "document_id": document_id,
                         "filename": file.filename,
@@ -95,7 +100,11 @@ async def upload_pdfs(files: list[UploadFile] = File(...)):
             )
 
         create_vector_store(all_chunks, ids=all_chunk_ids)
-        metadata = save_collection_metadata(collection_id, document_metadata)
+        metadata = save_collection_metadata(
+            user["user_id"],
+            collection_id,
+            document_metadata,
+        )
 
         return {
             "message": "PDF collection processed successfully",

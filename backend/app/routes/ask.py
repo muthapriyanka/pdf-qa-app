@@ -1,8 +1,9 @@
 import re
 import uuid
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
+from app.auth import get_current_user
 from app.models.schemas import AskRequest
 from app.services.llm_service import (
     generate_answer_from_context,
@@ -11,8 +12,9 @@ from app.services.llm_service import (
 from app.services.vector_store import get_vector_store, search_vector_store
 from app.storage.memory_store import (
     append_chat_turn,
-    document_store,
+    get_collection_metadata,
     get_chat_history,
+    get_document_metadata,
     get_latest_collection_id,
 )
 
@@ -218,7 +220,10 @@ def _filter_relevant_matches(
 
 
 @router.post("/ask")
-def ask_question(payload: AskRequest):
+def ask_question(
+    payload: AskRequest,
+    user: dict = Depends(get_current_user),
+):
     question = payload.question.strip()
 
     if not question:
@@ -228,11 +233,27 @@ def ask_question(payload: AskRequest):
     document_id = _resolve_document_id(payload.document_id)
     session_id = _resolve_session_id(payload.session_id)
     document_scoped = _is_document_scoped_question(question)
+    user_id = user["user_id"]
+
+    if document_id:
+        document = get_document_metadata(user_id, document_id)
+
+        if not document:
+            raise HTTPException(status_code=404, detail="Document was not found.")
+
+        if collection_id and collection_id != document["collection_id"]:
+            raise HTTPException(
+                status_code=400,
+                detail="Document does not belong to the selected collection.",
+            )
+
+        collection_id = collection_id or document["collection_id"]
 
     if document_scoped and not collection_id and not document_id:
-        collection_id = (
-            document_store.get("current_collection_id") or get_latest_collection_id()
-        )
+        collection_id = get_latest_collection_id(user_id)
+
+    if collection_id and not get_collection_metadata(user_id, collection_id):
+        raise HTTPException(status_code=404, detail="Document collection was not found.")
 
     if document_scoped and not collection_id and not document_id:
         raise HTTPException(
@@ -249,6 +270,7 @@ def ask_question(payload: AskRequest):
                 results = search_vector_store(
                     vector_store,
                     question,
+                    user_id=user_id,
                     collection_id=collection_id,
                     document_id=document_id,
                     top_k=TOP_K_CHUNKS,
@@ -272,12 +294,20 @@ def ask_question(payload: AskRequest):
             citations = []
         else:
             relevant_matches = _filter_relevant_matches(matches, document_scoped)
-            history = get_chat_history(session_id)
+            history = get_chat_history(user_id, session_id)
             answer = generate_answer_from_context(question, relevant_matches, history)
             source = "pdf"
             citations = _build_citations(relevant_matches)
 
-        append_chat_turn(session_id, collection_id, question, answer, source, citations)
+        append_chat_turn(
+            user_id,
+            session_id,
+            collection_id,
+            question,
+            answer,
+            source,
+            citations,
+        )
 
         return {
             "question": question,

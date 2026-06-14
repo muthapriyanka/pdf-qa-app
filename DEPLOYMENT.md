@@ -7,6 +7,7 @@ This project can run as one Docker container:
 - SQLite session storage
 - Chroma vector store
 - Ollama local inference
+- Hugging Face OAuth for private per-user workspaces
 
 ## Recommended Hugging Face Space
 
@@ -15,6 +16,10 @@ Create a new Hugging Face Space with:
 - SDK: Docker
 - Hardware: free CPU is okay for a lightweight demo
 - Persistent storage: recommended if you want uploaded PDFs/chats to survive restarts
+- `hf_oauth: true` in `README.md` so Hugging Face provides OAuth variables
+
+The app only requests the default `openid profile` scopes. Uploaded PDFs,
+collections, and chat history are scoped to the signed-in Hugging Face user.
 
 ## Default Demo Model
 
