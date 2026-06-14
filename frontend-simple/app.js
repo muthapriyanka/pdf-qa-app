@@ -376,6 +376,24 @@ function App() {
       return;
     }
 
+    const linkedCollection =
+      activeSession.collectionId === GENERAL_COLLECTION_ID
+        ? null
+        : collections.find(
+            (collection) => collection.collection_id === activeSession.collectionId
+          );
+
+    if (linkedCollection) {
+      const title = getCollectionTitle(linkedCollection);
+      const confirmed = window.confirm(
+        `Clear this chat and delete "${title}" from your documents?`
+      );
+
+      if (!confirmed) {
+        return;
+      }
+    }
+
     try {
       const response = await apiFetch(`/api/sessions/${activeSession.id}/messages`, {
         method: "DELETE",
@@ -387,9 +405,17 @@ function App() {
       }
 
       upsertSession(apiSessionToUiSession(data));
+
+      if (linkedCollection) {
+        await deleteCollection(linkedCollection, {
+          confirm: false,
+          throwOnError: true,
+        });
+      }
+
       setError("");
     } catch (err) {
-      setError(err.message || "Could not clear chat.");
+      setError(err.message || "Could not clear chat or delete document.");
     }
   };
 
@@ -462,6 +488,60 @@ function App() {
       setError("");
     } catch (err) {
       setError(err.message || "Could not delete chat.");
+    }
+  };
+
+  const removeCollectionFromUi = (collection) => {
+    setCollections((current) =>
+      current.filter((item) => item.collection_id !== collection.collection_id)
+    );
+    setSessions((current) =>
+      current.map((session) => (
+        session.collectionId === collection.collection_id
+          ? { ...session, collectionId: GENERAL_COLLECTION_ID }
+          : session
+      ))
+    );
+
+    if (uploadResult?.collection_id === collection.collection_id) {
+      setUploadResult(null);
+    }
+
+    setSelectedFiles([]);
+  };
+
+  const deleteCollection = async (collection, options = {}) => {
+    const title = getCollectionTitle(collection);
+    const shouldConfirm = options.confirm !== false;
+
+    if (
+      shouldConfirm &&
+      !window.confirm(`Delete "${title}" from your documents? Chats will stay saved.`)
+    ) {
+      return false;
+    }
+
+    try {
+      const response = await apiFetch(`/api/collections/${collection.collection_id}`, {
+        method: "DELETE",
+      });
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.detail || "Could not delete document.");
+      }
+
+      removeCollectionFromUi(collection);
+      setError("");
+      return true;
+    } catch (err) {
+      setError(err.message || "Could not delete document.");
+
+      if (options.throwOnError) {
+        throw err;
+      }
+
+      return false;
     }
   };
 
@@ -838,19 +918,40 @@ function App() {
                 );
 
                 return (
-                  <button
+                  <div
                     key={collection.collection_id}
                     className={`collection-item ${
                       activeCollection?.collection_id === collection.collection_id ? "active" : ""
                     }`}
+                    role="button"
+                    tabIndex="0"
                     onClick={() => openCollection(collection)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        openCollection(collection);
+                      }
+                    }}
                   >
-                    <span>{getCollectionTitle(collection)}</span>
-                    <small>
-                      {formatCount(collection.total_files, "file")} ·{" "}
-                      {formatCount(collectionSessions.length, "chat")}
-                    </small>
-                  </button>
+                    <div className="collection-main">
+                      <span>{getCollectionTitle(collection)}</span>
+                      <small>
+                        {formatCount(collection.total_files, "file")} ·{" "}
+                        {formatCount(collectionSessions.length, "chat")}
+                      </small>
+                    </div>
+                    <div className="session-actions">
+                      <button
+                        className="mini-button danger"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          deleteCollection(collection);
+                        }}
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  </div>
                 );
               })}
             </div>

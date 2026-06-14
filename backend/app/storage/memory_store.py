@@ -277,6 +277,20 @@ def _refresh_document_store(collection: dict[str, Any]) -> None:
         document_store["documents"][document["document_id"]] = document
 
 
+def _remove_collection_from_document_store(collection: dict[str, Any]) -> None:
+    collection_id = collection["collection_id"]
+    document_store["collections"].pop(collection_id, None)
+
+    for document in collection["documents"]:
+        document_store["documents"].pop(document["document_id"], None)
+
+    if document_store.get("current_collection_id") == collection_id:
+        document_store["current_collection_id"] = None
+        document_store["current_document_id"] = None
+        document_store["filename"] = None
+        document_store["document_id"] = None
+
+
 def save_collection_metadata(
     user_id: str,
     collection_id: str,
@@ -364,6 +378,31 @@ def get_collection_metadata(
         ).fetchone()
 
         return _collection_from_row(connection, row) if row else None
+
+
+def delete_collection_metadata(
+    user_id: str,
+    collection_id: str,
+) -> dict[str, Any] | None:
+    metadata = get_collection_metadata(user_id, collection_id)
+
+    if not metadata:
+        return None
+
+    with _connect() as connection:
+        cursor = connection.execute(
+            """
+            DELETE FROM collections
+            WHERE collection_id = ? AND user_id = ?
+            """,
+            (collection_id, user_id),
+        )
+
+    if cursor.rowcount == 0:
+        return None
+
+    _remove_collection_from_document_store(metadata)
+    return metadata
 
 
 def list_collection_metadata(user_id: str) -> list[dict[str, Any]]:

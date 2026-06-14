@@ -30,6 +30,26 @@ def create_vector_store(chunks, ids: list[str] | None = None):
     return vector_store
 
 
+def delete_collection_vectors(collection: dict) -> int:
+    ids = []
+    collection_id = collection["collection_id"]
+
+    for document in collection.get("documents", []):
+        document_id = document["document_id"]
+        total_chunks = int(document.get("total_chunks") or 0)
+        ids.extend(
+            f"{collection_id}:{document_id}:{index}"
+            for index in range(total_chunks)
+        )
+
+    if not ids:
+        return 0
+
+    vector_store = get_vector_store()
+    vector_store.delete(ids=ids)
+    return len(ids)
+
+
 def search_vector_store(
     vector_store,
     question: str,

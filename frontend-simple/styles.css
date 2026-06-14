@@ -435,10 +435,7 @@ h3 {
   text-align: left;
 }
 
-.collection-item {
-  display: block;
-}
-
+.collection-item,
 .session-item {
   display: flex;
   align-items: flex-start;
@@ -462,6 +459,7 @@ h3 {
   overflow-wrap: anywhere;
 }
 
+.collection-main,
 .session-main {
   min-width: 0;
 }

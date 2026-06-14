@@ -2,8 +2,10 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from app.auth import get_current_user
 from app.models.schemas import CreateSessionRequest, UpdateSessionRequest
+from app.services.vector_store import delete_collection_vectors
 from app.storage.memory_store import (
     clear_chat_messages,
+    delete_collection_metadata,
     create_chat_session,
     delete_chat_session,
     get_collection_metadata,
@@ -51,6 +53,32 @@ def create_session(
         collection_id=collection_id,
         title=(payload.title or "").strip() or "Chat",
     )
+
+
+@router.delete("/collections/{collection_id}")
+def delete_collection(collection_id: str, user: dict = Depends(get_current_user)):
+    collection = get_collection_metadata(user["user_id"], collection_id)
+
+    if not collection:
+        raise HTTPException(status_code=404, detail="Document collection was not found.")
+
+    deleted_collection = delete_collection_metadata(user["user_id"], collection_id)
+
+    if not deleted_collection:
+        raise HTTPException(status_code=404, detail="Document collection was not found.")
+
+    deleted_chunks = 0
+
+    try:
+        deleted_chunks = delete_collection_vectors(collection)
+    except Exception:
+        deleted_chunks = 0
+
+    return {
+        "deleted": True,
+        "collection_id": collection_id,
+        "deleted_chunks": deleted_chunks,
+    }
 
 
 @router.patch("/sessions/{session_id}")
