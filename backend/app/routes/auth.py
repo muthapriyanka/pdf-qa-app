@@ -7,6 +7,7 @@ from app.auth import (
     STATE_COOKIE_NAME,
     auth_required,
     build_authorization_url,
+    configured_oauth_providers,
     cookie_secure,
     exchange_oauth_code,
     fetch_oauth_user,
@@ -25,6 +26,7 @@ router = APIRouter()
 @router.get("/auth/status")
 def auth_status(request: Request):
     required = auth_required()
+    providers = configured_oauth_providers()
 
     if not required:
         user = get_current_user(request)
@@ -32,6 +34,7 @@ def auth_status(request: Request):
             "authenticated": True,
             "required": False,
             "configured": oauth_configured(),
+            "providers": providers,
             "user": user,
         }
 
@@ -42,6 +45,7 @@ def auth_status(request: Request):
             "authenticated": False,
             "required": True,
             "configured": oauth_configured(),
+            "providers": providers,
             "user": None,
         }
 
@@ -49,17 +53,25 @@ def auth_status(request: Request):
         "authenticated": True,
         "required": True,
         "configured": oauth_configured(),
+        "providers": providers,
         "user": user,
     }
 
 
 @router.get("/auth/login")
 def login(request: Request):
+    return login_with_provider(request, "huggingface")
+
+
+@router.get("/auth/{provider_id}/login")
+def login_with_provider(request: Request, provider_id: str):
     if not auth_required():
         return RedirectResponse(url="/")
 
     state = generate_oauth_state()
-    response = RedirectResponse(url=build_authorization_url(request, state))
+    response = RedirectResponse(
+        url=build_authorization_url(request, state, provider_id)
+    )
     response.set_cookie(
         STATE_COOKIE_NAME,
         state,
@@ -73,13 +85,23 @@ def login(request: Request):
 
 @router.get("/auth/callback")
 def auth_callback(request: Request, code: str | None = None, state: str | None = None):
+    return auth_provider_callback(request, "huggingface", code, state)
+
+
+@router.get("/auth/{provider_id}/callback")
+def auth_provider_callback(
+    request: Request,
+    provider_id: str,
+    code: str | None = None,
+    state: str | None = None,
+):
     expected_state = request.cookies.get(STATE_COOKIE_NAME)
 
     if not code or not state or not expected_state or state != expected_state:
         raise HTTPException(status_code=400, detail="Invalid OAuth callback state.")
 
-    token_data = exchange_oauth_code(request, code)
-    oauth_user = fetch_oauth_user(token_data["access_token"])
+    token_data = exchange_oauth_code(request, code, provider_id)
+    oauth_user = fetch_oauth_user(token_data["access_token"], provider_id)
     session_token = generate_session_token()
     create_auth_session(session_token, oauth_user, session_expires_at())
 

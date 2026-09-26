@@ -7,7 +7,7 @@ This project can run as one Docker container:
 - SQLite session storage
 - Chroma vector store
 - Ollama local inference
-- Hugging Face OAuth for private per-user workspaces
+- Hugging Face and Google OAuth for private per-user workspaces
 
 ## Recommended Hugging Face Space
 
@@ -16,10 +16,12 @@ Create a new Hugging Face Space with:
 - SDK: Docker
 - Hardware: free CPU is okay for a lightweight demo
 - Persistent storage: recommended if you want uploaded PDFs/chats to survive restarts
-- `hf_oauth: true` in `README.md` so Hugging Face provides OAuth variables
+- `hf_oauth: true` in `README.md` so Hugging Face provides Hugging Face OAuth variables
+- Optional Google OAuth credentials as Space secrets
 
-The app only requests the default `openid profile` scopes. Uploaded PDFs,
-collections, and chat history are scoped to the signed-in Hugging Face user.
+The Hugging Face provider requests `openid profile`. The Google provider
+requests `openid profile email`. Uploaded PDFs, collections, and chat history
+are scoped to the signed-in user.
 
 ## Default Demo Model
 
@@ -52,6 +54,19 @@ SENTENCE_TRANSFORMERS_HOME=/data/sentence-transformers
 OLLAMA_URL=http://127.0.0.1:11434/api/generate
 OLLAMA_MODEL=qwen2.5:0.5b
 OLLAMA_TIMEOUT_SECONDS=180
+```
+
+Optional Google OAuth secrets:
+
+```text
+GOOGLE_CLIENT_ID=your-google-client-id
+GOOGLE_CLIENT_SECRET=your-google-client-secret
+```
+
+For Google login, add this authorized redirect URI in Google Cloud Console:
+
+```text
+https://muthapriyanka27-pdf-qa-assistant.hf.space/api/auth/google/callback
 ```
 
 If you do not attach persistent storage, `/data` may reset when the Space restarts.

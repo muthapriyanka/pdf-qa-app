@@ -13,7 +13,7 @@ Live demo: [muthapriyanka27-pdf-qa-assistant.hf.space](https://muthapriyanka27-p
 - Multi-PDF upload with automatic parsing, chunking, embedding, and indexing.
 - Retrieval-augmented answers with filename and page citations.
 - General-question fallback when a question is not supported by uploaded PDFs.
-- Hugging Face OAuth login for private, user-scoped document workspaces.
+- Hugging Face and Google OAuth login for private, user-scoped document workspaces.
 - Persistent SQLite chat sessions, messages, document collections, and auth sessions.
 - ChromaDB vector search with per-user metadata filtering.
 - Clear chat, rename chat, delete chat, and delete document flows.
@@ -29,7 +29,7 @@ Live demo: [muthapriyanka27-pdf-qa-assistant.hf.space](https://muthapriyanka27-p
 | PDF Processing | PyPDF, LangChain text splitters |
 | LLM Inference | Ollama |
 | Persistence | SQLite, Chroma persistent storage |
-| Auth | Hugging Face OAuth |
+| Auth | Hugging Face OAuth, Google OAuth |
 | Deployment | Docker, Hugging Face Spaces |
 
 ## Architecture
@@ -59,13 +59,14 @@ metadata. ChromaDB stores embedded PDF chunks with user/document metadata.
 - `DELETE /api/sessions/{session_id}` deletes a chat.
 - `DELETE /api/collections/{collection_id}` deletes a document collection and its vector chunks.
 - `GET /api/auth/login` starts Hugging Face OAuth login.
+- `GET /api/auth/google/login` starts Google OAuth login.
 - `POST /api/auth/logout` clears the auth session.
 
 ## Privacy Model
 
-The deployed app uses Hugging Face OAuth. Each collection, document, chat
-session, and retrieval query is scoped by `user_id`, so one signed-in user cannot
-see another user's uploaded PDFs or chat history.
+The deployed app supports Hugging Face OAuth and Google OAuth. Each collection,
+document, chat session, and retrieval query is scoped by `user_id`, so one
+signed-in user cannot see another user's uploaded PDFs or chat history.
 
 For local development, auth is relaxed by default and uses a local development
 user. Set `REQUIRE_AUTH=true` to force the same auth behavior locally.
@@ -117,6 +118,20 @@ Optional backend environment variables:
 OLLAMA_URL=http://127.0.0.1:11434/api/generate
 OLLAMA_MODEL=llama3
 REQUIRE_AUTH=false
+GOOGLE_CLIENT_ID=your-google-client-id
+GOOGLE_CLIENT_SECRET=your-google-client-secret
+```
+
+For Google login, add this authorized redirect URI in Google Cloud Console:
+
+```text
+http://127.0.0.1:8000/api/auth/google/callback
+```
+
+For the deployed Hugging Face Space, use:
+
+```text
+https://muthapriyanka27-pdf-qa-assistant.hf.space/api/auth/google/callback
 ```
 
 ## Deployment
@@ -172,6 +187,6 @@ DEPLOYMENT.md      Deployment notes
 ## Resume Summary
 
 Built a full-stack RAG document assistant with FastAPI, ChromaDB, LangChain,
-Hugging Face embeddings, Ollama inference, Hugging Face OAuth, SQLite-backed
+Hugging Face embeddings, Ollama inference, multi-provider OAuth, SQLite-backed
 chat persistence, citation-backed answers, multi-PDF upload, and a responsive
 React UI deployed on Hugging Face Spaces.

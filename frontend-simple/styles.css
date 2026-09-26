@@ -226,6 +226,12 @@ h3 {
   margin-top: 8px;
 }
 
+.auth-actions {
+  display: grid;
+  gap: 10px;
+  margin-top: 8px;
+}
+
 .panel-header {
   padding: 20px 20px 0;
 }

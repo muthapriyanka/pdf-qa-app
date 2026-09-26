@@ -120,6 +120,7 @@ function App() {
   const isAuthenticated = Boolean(auth?.authenticated);
   const authIsReady = auth !== null;
   const currentUser = auth?.user || null;
+  const authProviders = auth?.providers || [];
   const activeSession = sessions.find((session) => session.id === activeSessionId) || sessions[0] || null;
   const collectionId = activeSession?.collectionId || uploadResult?.collection_id || GENERAL_COLLECTION_ID;
   const activeCollection =
@@ -685,8 +686,12 @@ function App() {
     }
   };
 
-  const signIn = () => {
-    window.location.href = `${API_BASE}/api/auth/login`;
+  const signIn = (providerId = "huggingface") => {
+    const path =
+      providerId === "huggingface"
+        ? "/api/auth/login"
+        : `/api/auth/${providerId}/login`;
+    window.location.href = `${API_BASE}${path}`;
   };
 
   const signOut = async () => {
@@ -791,20 +796,25 @@ function App() {
               <h2>Sign in to use Docuery AI</h2>
               <p>
                 Your uploaded PDFs, document collections, and chat history stay tied
-                to your Hugging Face account.
+                to your signed-in account.
               </p>
               {auth?.required && !auth?.configured && (
                 <div className="error-box">
-                  Hugging Face OAuth is not configured for this deployment yet.
+                  OAuth is not configured for this deployment yet.
                 </div>
               )}
-              <button
-                className="primary-button auth-button"
-                onClick={signIn}
-                disabled={auth?.required && !auth?.configured}
-              >
-                Sign in with Hugging Face
-              </button>
+              <div className="auth-actions">
+                {authProviders.map((provider) => (
+                  <button
+                    key={provider.id}
+                    className="primary-button auth-button"
+                    onClick={() => signIn(provider.id)}
+                    disabled={auth?.required && !auth?.configured}
+                  >
+                    Sign in with {provider.label}
+                  </button>
+                ))}
+              </div>
             </div>
           </section>
         ) : (
